@@ -1,0 +1,2 @@
+# minitouch-demo
+本项目是minitouch项目的修改版，在原有代码的基础上增加了键盘外设的检测和监听，并增加了Android project的项目关系，具体使用与minitouch相同
