@@ -22,6 +22,8 @@
 
 static int g_verbose = 0;
 
+
+
 static void usage(const char *pname) {
     fprintf(stderr,
             "Usage: %s [-h] [-d <device>] [-n <name>] [-v] [-i] [-f <file>]\n"
@@ -71,6 +73,18 @@ typedef struct {
     char path[100];
     struct libevdev *evdev;
 } internal_state_keyboard_t; //表示键盘设备的结构体
+
+
+typedef struct {
+    internal_state_touchpad_t touchpad;
+    internal_state_keyboard_t keyboard;
+} internal_state_warper;
+
+static void mappingKeyboardEvent(struct input_event *pEvent, internal_state_touchpad_t *ptr);
+
+static void dealWithActionUp(struct input_event *pEvent, internal_state_touchpad_t *touchpad);
+
+static void dealWithActionDown(struct input_event *pEvent, internal_state_touchpad_t *touchpad);
 
 
 /**
@@ -165,8 +179,8 @@ static int consider_keyboard_device(const char *devpath, internal_state_keyboard
     }
 
     mismatch: //不是需要的设备
-        libevdev_grab(evdev, LIBEVDEV_UNGRAB);
-        libevdev_free(evdev);
+    libevdev_grab(evdev, LIBEVDEV_UNGRAB);
+    libevdev_free(evdev);
     if (fd >= 0) {
         close(fd); //关闭文件流
     }
@@ -650,7 +664,8 @@ static int commit(internal_state_touchpad_t *state) {
 }
 
 static int start_server(char *sockname) {
-    int fd = socket(AF_UNIX, SOCK_STREAM,0); // AF_UNIX, 典型的本地IPC，类似于管道，依赖路径名标识发送方和接收方,只能用于本机内进程之间的通信
+    int fd = socket(AF_UNIX, SOCK_STREAM,
+                    0); // AF_UNIX, 典型的本地IPC，类似于管道，依赖路径名标识发送方和接收方,只能用于本机内进程之间的通信
 
     if (fd < 0) {
         perror("creating socket");
@@ -750,13 +765,15 @@ static void io_handler(FILE *input, FILE *output, internal_state_touchpad_t *sta
 }
 
 static int
-print_event(struct input_event *ev) {
-    if (ev->type == EV_SYN)
+print_event(struct input_event *ev,internal_state_touchpad_t *stateTouchpad) {
+    if (ev->type == EV_SYN){
+        commit(stateTouchpad);
         fprintf(stderr, "Event: time %ld.%06ld, ++++++++++++++++++++ %s +++++++++++++++\n",
                 ev->time.tv_sec,
                 ev->time.tv_usec,
                 libevdev_event_type_get_name(ev->type));
-    else
+    }else{
+        mappingKeyboardEvent(ev,stateTouchpad);
         fprintf(stderr, "Event: time %ld.%06ld, type %d (%s), code %d (%s), value %d\n",
                 ev->time.tv_sec,
                 ev->time.tv_usec,
@@ -765,13 +782,14 @@ print_event(struct input_event *ev) {
                 ev->code,
                 libevdev_event_code_get_name(ev->type, ev->code),
                 ev->value);
+    }
     return 0;
 }
 
 static int
-print_sync_event(struct input_event *ev) {
+print_sync_event(struct input_event *ev,internal_state_touchpad_t *stateKeyboard) {
     printf("SYNC: ");
-    print_event(ev);
+    print_event(ev,stateKeyboard);
     return 0;
 }
 
@@ -782,7 +800,10 @@ print_sync_event(struct input_event *ev) {
  * @return
  */
 static void
-listen_keyboard_input(internal_state_keyboard_t state_keyboard) {
+listen_keyboard_input(internal_state_warper warper) {
+    internal_state_keyboard_t state_keyboard = warper.keyboard;
+    internal_state_touchpad_t state_touchpad = warper.touchpad;
+
     int id = pthread_self();
     printf("Thread ID: %x\n", id);
     int rc = 1;
@@ -793,18 +814,65 @@ listen_keyboard_input(internal_state_keyboard_t state_keyboard) {
         if (rc == LIBEVDEV_READ_STATUS_SYNC) {
             printf("::::::::::::::::::::: dropped ::::::::::::::::::::::\n");
             while (rc == LIBEVDEV_READ_STATUS_SYNC) {
-                if(g_verbose){
-                    print_sync_event(&ev);
-                }
-                // todo 对输入事件进行解析和处理
 
+                if (g_verbose) {
+                    print_sync_event(&ev,&state_touchpad);
+                }
                 rc = libevdev_next_event(state_keyboard.evdev, LIBEVDEV_READ_FLAG_SYNC, &ev);
             }
             printf("::::::::::::::::::::: re-synced ::::::::::::::::::::::\n");
         } else if (rc == LIBEVDEV_READ_STATUS_SUCCESS)
-            print_event(&ev);
+            print_event(&ev,&state_touchpad);
     } while (rc == LIBEVDEV_READ_STATUS_SYNC || rc == LIBEVDEV_READ_STATUS_SUCCESS ||
              rc == -EAGAIN);
+}
+
+static void mappingKeyboardEvent(struct input_event *pEvent, internal_state_touchpad_t *stateTouchpad) {
+    //当触发指定按键时，发送相应的多点触控指令，可以做一个WASD画圆的sample
+    fprintf(stderr,"mappingKeyboardEvent...");
+    int action = pEvent->value;
+    fprintf(stderr,"action:%d",action);
+    switch (action) {
+        case 0: //action_up
+            dealWithActionUp(pEvent, stateTouchpad);
+            break;
+        case 1://action_down
+            dealWithActionDown(pEvent, stateTouchpad);
+            break;
+    }
+}
+
+
+static void dealWithActionUp(struct input_event *pEvent, internal_state_touchpad_t *touchpad) {
+    // 定义AS的映射点（可以做成可配置的选项）
+    int key_code = pEvent->code;
+    switch (key_code) {
+        case KEY_A:
+            //todo 触发A对应点的按下事件
+            touch_up(touchpad, 0);
+            break;
+        case KEY_D:
+            //todo 触发B对应点的按下事件
+            touch_up(touchpad, 1);
+            break;
+    }
+}
+
+static void dealWithActionDown(struct input_event *pEvent, internal_state_touchpad_t *touchpad) {
+    // 定义AS的映射点（可以做成可配置的选项）
+    int pointer_A[2] = {230, 491};
+    int pointer_S[2] = {230, 732};
+    int key_code = pEvent->code;
+    switch (key_code) {
+        case KEY_A:
+            //todo 触发A对应点的按下事件
+            touch_down(touchpad, 0, pointer_A[0], pointer_A[1], 10);
+            break;
+        case KEY_D:
+            //todo 触发B对应点的按下事件
+            touch_down(touchpad, 1, pointer_S[0], pointer_S[1], 10);
+            break;
+    }
 }
 
 int main(int argc, char *argv[]) { //入口函数
@@ -845,6 +913,9 @@ int main(int argc, char *argv[]) { //入口函数
     internal_state_touchpad_t state_touchpad = {0}; // 对触摸设备的结构体初始化
 
     internal_state_keyboard_t state_keyboard = {0}; // 对键盘设备的结构体初始化
+
+    internal_state_warper state_waper = {0, 0};
+
 
     if (device != NULL) { //指定设备
         if (!consider_touch_device(device, &state_touchpad)) {  //判断触控设备是否可用
@@ -970,11 +1041,14 @@ int main(int argc, char *argv[]) { //入口函数
         return EXIT_FAILURE;
     }
 
+    state_waper.keyboard = state_keyboard;
+    state_waper.touchpad = state_touchpad;
+
 
     pthread_t keyboardThread;
 
     pthread_create(&keyboardThread, NULL, (void *) &listen_keyboard_input,
-                   (void *) &state_keyboard);
+                   (void *) &state_waper);
 
     while (1) { //监听socket客户端发送的消息
         int client_fd = accept(server_fd, (struct sockaddr *) &client_addr,
