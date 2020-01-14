@@ -12,15 +12,37 @@
 #include <sys/un.h>
 #include <unistd.h>
 #include <pthread.h>
-
+#include <sys/inotify.h>
 #include <libevdev.h>
+#include <sys/types.h>
+#include <asm/types.h>
+#include <linux/netlink.h>
 
 #define MAX_SUPPORTED_CONTACTS 10
 #define VERSION 1
 #define DEFAULT_SOCKET_NAME "minitouch"
+#define EVENT_NUM 12
 
 
 static int g_verbose = 0;
+
+
+static
+char *event_str[EVENT_NUM] =
+        {
+                "IN_ACCESS",
+                "IN_MODIFY",
+                "IN_ATTRIB",
+                "IN_CLOSE_WRITE",
+                "IN_CLOSE_NOWRITE",
+                "IN_OPEN",
+                "IN_MOVED_FROM",
+                "IN_MOVED_TO",
+                "IN_CREATE",
+                "IN_DELETE",
+                "IN_DELETE_SELF",
+                "IN_MOVE_SELF"
+        };
 
 
 
@@ -764,7 +786,7 @@ static void io_handler(FILE *input, FILE *output, internal_state_touchpad_t *sta
     }
 }
 
-static int
+static void
 print_event(struct input_event *ev,internal_state_touchpad_t *stateTouchpad) {
     if (ev->type == EV_SYN){
         commit(stateTouchpad);
@@ -783,14 +805,12 @@ print_event(struct input_event *ev,internal_state_touchpad_t *stateTouchpad) {
                 libevdev_event_code_get_name(ev->type, ev->code),
                 ev->value);
     }
-    return 0;
 }
 
-static int
+static void
 print_sync_event(struct input_event *ev,internal_state_touchpad_t *stateKeyboard) {
     printf("SYNC: ");
     print_event(ev,stateKeyboard);
-    return 0;
 }
 
 /**
@@ -865,14 +885,147 @@ static void dealWithActionDown(struct input_event *pEvent, internal_state_touchp
     int key_code = pEvent->code;
     switch (key_code) {
         case KEY_A:
-            //todo 触发A对应点的按下事件
+            // 触发A对应点的按下事件
             touch_down(touchpad, 0, pointer_A[0], pointer_A[1], 10);
             break;
         case KEY_D:
-            //todo 触发B对应点的按下事件
+            // 触发D对应点的按下事件
             touch_down(touchpad, 1, pointer_S[0], pointer_S[1], 10);
             break;
     }
+}
+
+
+
+char* strJoin(char *s1, char *s2)
+{
+    char *result = malloc(strlen(s1)+strlen(s2)+1);//+1 for the zero-terminator
+    if(result==NULL){
+        return "";
+    }
+    strcpy(result, s1);
+    strcat(result, s2);
+    return result;
+}
+
+
+
+static void
+on_device_added(internal_state_warper warper, struct inotify_event *pEvent, char *val) {
+    // 有新设备添加时，应该判断event是否为键盘设备
+    char *name = pEvent->name;
+    char *root_path = "dev/input/";
+    char *dev_path = strJoin(root_path,name);
+    fprintf(stderr,"on device added:%s,",dev_path);
+    consider_keyboard_device(dev_path,&warper.keyboard);
+    if(warper.keyboard.evdev){ //找到设备
+        fprintf(stderr,"and it's keyboard device\n");
+        pthread_t keyboardThread;
+        pthread_create(&keyboardThread, NULL, (void *) &listen_keyboard_input, (void *) &warper);
+    } else{ //未找到设备
+        fprintf(stderr,"but it's not a keyboard kevice\n");
+    }
+}
+
+static void on_device_removed(struct inotify_event *pEvent, char *val) {
+    //todo 有设备移除
+}
+
+
+
+/**
+ * 使用inotify方式对文件变化进行监听
+ */
+static void watch_inotify(internal_state_warper warper) {
+    int fd;
+    int wd;
+    int len;
+    int nread;
+    char buf[BUFSIZ];
+    struct inotify_event *event;
+    int i;
+
+    fd = inotify_init();
+    if (fd < 0) {
+        fprintf(stderr, "inotify_init failed\n");
+    }
+
+    wd = inotify_add_watch(fd, "dev/input", (IN_CREATE | IN_DELETE));
+    if (wd < 0) {
+        fprintf(stderr, "inotify_add_watch %s failed\n", "dev/input");
+    }
+
+    fprintf(stderr,">>> watching device state change...\n");
+
+    buf[sizeof(buf) - 1] = 0;
+    while ((len = read(fd, buf, sizeof(buf) - 1)) > 0) {
+        nread = 0;
+        while (len > 0) {
+            event = (struct inotify_event *) &buf[nread];
+            for (i = 0; i < EVENT_NUM; i++) {
+                if ((event->mask >> i) & 1) {
+                    if (event->len > 0) {
+                        char *eventVal = event_str[i];
+                        fprintf(stdout, "%s --- %s\n", event->name, eventVal);
+                        if (strcmp(eventVal,"IN_CREATE") == 0) {
+                            fprintf(stdout, "on device added: %s --- %s\n", event->name, eventVal);
+                            on_device_added(warper,event,eventVal);//有设备添加
+                        }else if (strcmp(eventVal, "IN_DELETE")==0) {
+                            fprintf(stdout, "on device removed: %s --- %s\n", event->name, eventVal);
+                            on_device_removed(event,eventVal);//有设备移除
+                        }
+                    } else {
+                        fprintf(stdout, "%s --- %s\n", " ", event_str[i]);
+                    }
+                }
+            }
+            nread = nread + sizeof(struct inotify_event) + event->len;
+            len = len - sizeof(struct inotify_event) - event->len;
+        }
+    }
+}
+
+
+/**
+ * Warning: shell下无权限对该socket进行bind操作
+ * 使用netLink对键盘的插入/拔出进行监听
+ */
+static void monitorNetlinkUevent() {
+    int sockfd;
+    struct sockaddr_nl sa;
+    int len;
+    char buf[4096];
+    struct iovec iov;
+    struct msghdr msg;
+    int i;
+
+    memset(&sa, 0, sizeof(sa));
+    sa.nl_family = AF_NETLINK;
+    sa.nl_groups = NETLINK_KOBJECT_UEVENT;
+    sa.nl_pid = 0;//getpid(); both is ok
+    memset(&msg, 0, sizeof(msg));
+    iov.iov_base = (void *) buf;
+    iov.iov_len = sizeof(buf);
+    msg.msg_name = (void *) &sa;
+    msg.msg_namelen = sizeof(sa);
+    msg.msg_iov = &iov;
+    msg.msg_iovlen = 1;
+
+    sockfd = socket(AF_NETLINK, SOCK_RAW, NETLINK_KOBJECT_UEVENT);
+    if (sockfd == -1)
+        printf("socket creating failed:%s\n", strerror(errno));
+    if (bind(sockfd, (struct sockaddr *) &sa, sizeof(sa)) == -1)
+        printf("bind error:%s\n", strerror(errno));
+
+    len = recvmsg(sockfd, &msg, 0);
+    if (len < 0)
+        printf("receive error\n");
+    else if (len < 32 || len > sizeof(buf))
+        printf("invalid message");
+    for (i = 0; i < len; i++)
+        if (*(buf + i) == '\0')
+            buf[i] = '\n';
+    fprintf(stderr, "received %d bytes\n%s\n", len, buf);
 }
 
 int main(int argc, char *argv[]) { //入口函数
@@ -917,6 +1070,7 @@ int main(int argc, char *argv[]) { //入口函数
     internal_state_warper state_waper = {0, 0};
 
 
+    //程序第一次运行时，检测是否有可触控设备及键盘设备
     if (device != NULL) { //指定设备
         if (!consider_touch_device(device, &state_touchpad)) {  //判断触控设备是否可用
             fprintf(stderr, "%s is not a supported touch device\n", device);
@@ -1044,11 +1198,18 @@ int main(int argc, char *argv[]) { //入口函数
     state_waper.keyboard = state_keyboard;
     state_waper.touchpad = state_touchpad;
 
+    if(state_keyboard.evdev!=0){
+        pthread_t keyboardThread;
 
-    pthread_t keyboardThread;
+        pthread_create(&keyboardThread, NULL, (void *) &listen_keyboard_input,
+                       (void *) &state_waper);
+    } else{
+        fprintf(stderr,">>> keyboard device not found\n");
+    }
 
-    pthread_create(&keyboardThread, NULL, (void *) &listen_keyboard_input,
-                   (void *) &state_waper);
+    pthread_t  watcherThread;
+    pthread_create(&watcherThread,NULL,(void *)&watch_inotify,&state_waper);
+
 
     while (1) { //监听socket客户端发送的消息
         int client_fd = accept(server_fd, (struct sockaddr *) &client_addr,
