@@ -69,30 +69,30 @@ typedef struct {
 
 typedef struct {
     int fd; //文件描述符
-    int score;
-    char path[100];
+    int score; //触摸设备的匹配分值
+    char path[100]; //设备的event路径 dev/input/device4
     struct libevdev *evdev;
-    int has_mtslot;
-    int has_tracking_id;
+    int has_mtslot; //type B
+    int has_tracking_id; // type B
     int has_key_btn_touch;
-    int has_touch_major;
-    int has_width_major;
+    int has_touch_major; //真实接触面积的横轴
+    int has_width_major; //触控工具（手指，触控）的接触面积的横轴
     int has_pressure;
-    int min_pressure; //最小的压力值
-    int max_pressure; //最大的压力值
-    int max_x; //x轴最大的触控范围
-    int max_y; //y轴最大的触控范围
-    int max_contacts; //最大的触控点数
+    int min_pressure; //最小的压力值 >0
+    int max_pressure; //最大的压力值 <=1
+    int max_x; //x轴最大的触控范围 1080
+    int max_y; //y轴最大的触控范围 1920
+    int max_contacts;  //最大的触控点数 多点触控  软件（多点触控具体实现）  屏幕硬件支持（10  小米8（8））
     int max_tracking_id;
-    int tracking_id; //type b协议中使用的用来区分触控点的 tracking_id
+    int tracking_id; //type b协议中使用的用来区分触控点的 tracking_id  type B 有状态的多点触控协议
     contact_t contacts[MAX_SUPPORTED_CONTACTS]; // 多点触控点数的数组，最多支持10个触控点
-    int active_contacts;
+    int active_contacts; //可用的触控点击
 } internal_state_touchpad_t; // 记录触控设备的结构体
 
 
 typedef struct {
     int fd;
-    char path[100];
+    char path[100]; // dev/input/event10 键盘设备
     struct libevdev *evdev;
 } internal_state_keyboard_t; //表示键盘设备的结构体
 
@@ -109,12 +109,24 @@ static void dealWithActionUp(struct input_event *pEvent, internal_state_touchpad
 static void dealWithActionDown(struct input_event *pEvent, internal_state_touchpad_t *touchpad);
 
 
+
+
 /**
+ *
+ * 宏定义   文件类型
+ * S_ISREG()   普通文件
+ * S_ISDIR()   目录文件
+ * S_ISCHR()   字符设备文件
+ * S_ISBLK()   块设备文件
+ * S_ISFIFO()  有名管道文件
+ * S_ISLNK()   软连接(符号链接)文件
+ * S_ISSOCK()  套接字文件
+ *
  * 判断是否是字符输入设备
  * @param devpath
  * @return
  */
-static int is_character_device(const char *devpath) {
+static int is_character_device(const char *devpath) { //https://cnbin.github.io/blog/2015/06/24/linux-wen-jian-io-jie-shao-(er-)/
     struct stat statbuf;
 
     if (stat(devpath, &statbuf) == -1) {
@@ -143,7 +155,7 @@ static int is_multitouch_device(struct libevdev *evdev) {
  * @param evdev
  * @return
  */
-static int is_keyboard_device(struct libevdev *evdev) {
+static int is_keyboard_device(struct libevdev *evdev) { // 键盘 A S D F  https://zhidao.baidu.com/question/715096289382651925.html
     int hasA = libevdev_has_event_code(evdev, EV_KEY, KEY_A);
     int hasS = libevdev_has_event_code(evdev, EV_KEY, KEY_S);
     int hasD = libevdev_has_event_code(evdev, EV_KEY, KEY_D);
@@ -250,7 +262,7 @@ consider_touch_device(const char *devpath, internal_state_touchpad_t *state) { /
     }
 
 
-    int score = 10000; //这个score是做什么用的？？？
+    int score = 10000; //这个score是做什么用的？？？ 适配工作
 
     if (libevdev_has_event_code(evdev, EV_ABS, ABS_MT_TOOL_TYPE)) { // evdev 是输入设备的结构体指针
         int tool_min = libevdev_get_abs_minimum(evdev, ABS_MT_TOOL_TYPE);
@@ -686,7 +698,7 @@ static int commit(internal_state_touchpad_t *state) {
 }
 
 static int start_server(char *sockname) {
-    int fd = socket(AF_UNIX, SOCK_STREAM,
+    int fd = socket(AF_UNIX, SOCK_STREAM, //https://blog.csdn.net/sandware/article/details/40923491
                     0); // AF_UNIX, 典型的本地IPC，类似于管道，依赖路径名标识发送方和接收方,只能用于本机内进程之间的通信
 
     if (fd < 0) {
@@ -834,7 +846,6 @@ listen_keyboard_input(internal_state_warper warper) {
         if (rc == LIBEVDEV_READ_STATUS_SYNC) {
             printf("::::::::::::::::::::: dropped ::::::::::::::::::::::\n");
             while (rc == LIBEVDEV_READ_STATUS_SYNC) {
-
                 if (g_verbose) {
                     print_sync_event(&ev,&state_touchpad);
                 }
@@ -868,16 +879,22 @@ static void dealWithActionUp(struct input_event *pEvent, internal_state_touchpad
     int key_code = pEvent->code;
     switch (key_code) {
         case KEY_A:
-            //todo 触发A对应点的按下事件
+            // 触发A对应点的按下事件
             touch_up(touchpad, 0);
             break;
         case KEY_D:
-            //todo 触发B对应点的按下事件
+            //触发B对应点的按下事件
             touch_up(touchpad, 1);
             break;
     }
 }
 
+
+/**
+ * 处理按下事件
+ * @param pEvent
+ * @param touchpad
+ */
 static void dealWithActionDown(struct input_event *pEvent, internal_state_touchpad_t *touchpad) {
     // 定义AS的映射点（可以做成可配置的选项）
     int pointer_A[2] = {230, 491};
@@ -928,7 +945,8 @@ on_device_added(internal_state_warper warper, struct inotify_event *pEvent, char
 }
 
 static void on_device_removed(struct inotify_event *pEvent, char *val) {
-    //todo 有设备移除
+    //有设备移除
+
 }
 
 
@@ -950,7 +968,7 @@ static void watch_inotify(internal_state_warper warper) {
         fprintf(stderr, "inotify_init failed\n");
     }
 
-    wd = inotify_add_watch(fd, "dev/input", (IN_CREATE | IN_DELETE));
+    wd = inotify_add_watch(fd, "dev/input", (IN_CREATE | IN_DELETE)); //对 dev/input 这个目录进行监听，监听两个事件：IN_CREATE和IN_DELETE
     if (wd < 0) {
         fprintf(stderr, "inotify_add_watch %s failed\n", "dev/input");
     }
@@ -965,6 +983,7 @@ static void watch_inotify(internal_state_warper warper) {
             for (i = 0; i < EVENT_NUM; i++) {
                 if ((event->mask >> i) & 1) {
                     if (event->len > 0) {
+
                         char *eventVal = event_str[i];
                         fprintf(stdout, "%s --- %s\n", event->name, eventVal);
                         if (strcmp(eventVal,"IN_CREATE") == 0) {
@@ -1067,7 +1086,16 @@ int main(int argc, char *argv[]) { //入口函数
 
     internal_state_keyboard_t state_keyboard = {0}; // 对键盘设备的结构体初始化
 
-    internal_state_warper state_waper = {0, 0};
+    //鼠标 如何判断是否是鼠标设备 x 3 y 3  结合业务需求  CS 转动视角  move（1920 1080）游戏  （0,0） move
+
+
+    //手柄 如何判断是否是手柄设备
+
+
+    //...
+
+
+    internal_state_warper state_waper = {0, 0};  //包装结构体
 
 
     //程序第一次运行时，检测是否有可触控设备及键盘设备
@@ -1076,7 +1104,7 @@ int main(int argc, char *argv[]) { //入口函数
             fprintf(stderr, "%s is not a supported touch device\n", device);
             return EXIT_FAILURE;
         }
-    } else { //非指定设备
+    } else { //非指定设备 //dev/input/eventX
         if (walk_devices(devroot, &state_touchpad, &state_keyboard) != 0) {
             fprintf(stderr, "Unable to crawl %s for touch devices\n", devroot);
             return EXIT_FAILURE; //退出程序
@@ -1138,14 +1166,14 @@ int main(int argc, char *argv[]) { //入口函数
 
     state_touchpad.tracking_id = 0;
 
-    int contact;
+    int contact;  //触控点数量
     for (contact = 0; contact < MAX_SUPPORTED_CONTACTS; ++contact) {
         state_touchpad.contacts[contact].enabled = 0;
     }
 
     fprintf(stderr,
             "%s touch device %s (%dx%d with %d contacts) detected on %s (score %d)\n",
-            state_touchpad.has_mtslot ? "Type B" : "Type A",
+            state_touchpad.has_mtslot ? "Type B" : "Type A", //根据触控槽来判断是什么协议类型
             libevdev_get_name(state_touchpad.evdev),
             state_touchpad.max_x, state_touchpad.max_y, state_touchpad.max_contacts,
             state_touchpad.path, state_touchpad.score
@@ -1207,7 +1235,7 @@ int main(int argc, char *argv[]) { //入口函数
         fprintf(stderr,">>> keyboard device not found\n");
     }
 
-    pthread_t  watcherThread;
+    pthread_t watcherThread;
     pthread_create(&watcherThread,NULL,(void *)&watch_inotify,&state_waper);
 
 
